@@ -1,0 +1,571 @@
+# Kaggle Competition
+
+Username: Vanyssa
+Score: 0.13480
+Ranking: 1970/4106- top 48%
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(plyr)
+library(dplyr)     # To compute the `union` of the levels.
+library(png)       # To include images in this document.
+library(knitr)     # To include images inline in this doc.
+library(moments)   # Skewness
+library(e1071)     # Alternative for Skewness
+library(glmnet)    # Lasso
+library(caret)     # To enable Lasso training with CV.
+
+```
+
+
+# Introduction
+
+This assignment focuses on applying the Feature Engineering processes and the Evaluation methods that we have learned in previous sessions to solve a practical scenario: Predict the price of houses.
+In particular, we are going to use the experimental scenario proposed by the House Prices Dataset. This dataset includes 79 explanatory variables of residential homes. For more details on the dataset and the competition see <https://www.kaggle.com/c/house-prices-advanced-regression-techniques>.
+
+This dataset is close to the kind of data that you will find in the real world: it is not clean, it might include repeated, correlated or uninformative features, it has null or wrong values... 
+Even though this is still far from the kind of messy database that you will find in a real company, it is a good starting point to realize the magnitude of the problem. Therefore, the first step is to visualize and analyze the dataset in order to understand the information that we have. Then, you have to clean the dataset to solve the problems it might present.
+
+Once we have the dataset cleaned, we can start the feature engineering process itself to select the most representative feature set to feed the regression models. Previously to this step, you can create new features or modify the ones already in the dataset. This step typically involves some knowledge domain about the particular scenario of the problem, either because you are an expert on the field or because you have access to people with this knowledge (i.e., the project owner, the business expert in your company,...). Although, I imagine you are not a real-estate expert, there are some sensible procedures or general domain knowledge that you can apply. Moreover, the competition provides a file (`data_description.txt`) that provides an explanation of each of the features that you may find useful for the cleaning and feature engineering process (i.e., this will be the business expert you could have at your company, explaining the data and the related aspects to you). Finally, you also have a lot of kernels at your disposal in the competition webpage to take ideas from. Be creative!
+
+
+## What is my goal?
+- I want to predict predict the final price of each home (Therefore, this is a regression task).
+- I have to clean the dataset to allow its further processing.
+- I have to use the feature engineering techniques explained in class to transform the dataset: filtering, wrapper and embedded methods.
+- I have to properly apply the evaluation methods and ideas (train, validation, test splitting; cross-validation, chose the proper metric, ..) to understand the real performance of the proposed models, making sure that they will generalize to unseen data (test set).
+
+# Useful Functions
+
+```{r message=FALSE, warning=FALSE}
+lm.model <- function(training_dataset, validation_dataset, title) {
+  # Create a training control configuration that applies a 5-fold cross validation
+  train_control_config <- trainControl(method = "repeatedcv", 
+                                       number = 5, 
+                                       repeats = 1,
+                                       returnResamp = "all")
+  
+  # Fit a glm model to the input training data
+  this.model <- caret::train(SalePrice ~ ., 
+                       data = training_dataset , 
+                       method = "glm", 
+                       metric = "RMSE",
+                       preProc = c("center", "scale"),
+                       trControl=train_control_config)
+  
+  # Prediction
+  this.model.pred <- predict(this.model, validation_dataset)
+  this.model.pred[is.na(this.model.pred)] <- 0 # To avoid null predictions
+  
+  # RMSE of the model
+  thismodel.rmse <- sqrt(mean((this.model.pred - validation_dataset$SalePrice)^2))
+  
+  # Error in terms of the mean deviation between the predicted value and the price of the houses
+  thismodel.price_error <- mean(abs((exp(this.model.pred) -1) - (exp(validation_dataset$SalePrice) -1)))
+
+  # Plot the predicted values against the actual prices of the houses
+  my_data <- as.data.frame(cbind(predicted=(exp(this.model.pred) -1), observed=(exp(validation_dataset$SalePrice) -1)))
+  ggplot(my_data, aes(predicted, observed)) +
+    geom_point() + geom_smooth(method = "lm") +
+    labs(x="Predicted") +
+    ggtitle(ggtitle(paste(title, 'RMSE: ', format(round(thismodel.rmse, 4), nsmall=4), ' --> Price ERROR:', format(round(thismodel.price_error, 0), nsmall=0), 
+                          ' €', sep=''))) +  
+    scale_x_continuous(labels = scales::comma) + 
+    scale_y_continuous(labels = scales::comma)
+}
+```
+
+Function to split a dataset into training and validation.
+
+```{r}
+splitdf <- function(dataframe) {
+  set.seed(123)
+ 	index <- 1:nrow(dataframe)
+ 	trainindex <- sample(index, trunc(length(index)/1.5))
+ 	trainset <- dataframe[trainindex, ]
+ 	testset <- dataframe[-trainindex, ]
+ 	list(trainset=trainset,testset=testset)
+}
+```
+
+
+# Data Reading and preparation
+The dataset is offered in two separated fields, one for the training and another one for the test set. 
+
+```{r Load Data}
+original_training_data <- read.csv('~/Downloads/train.csv')
+original_test_data <- read.csv('~/Downloads/test.csv')
+```
+
+```{r Joinning datasets}
+original_test_data$SalePrice <- 0
+dataset <- rbind(original_training_data, original_test_data)
+```
+
+## Let's now visualize the dataset to see where to begin
+```{r Dataset Visualization}
+summary(dataset)
+
+```
+
+# Data Cleaning
+
+## We remove meaningless features and incomplete cases.
+```{r NA transformation}
+dataset <- dataset[,-which(names(dataset) == "Utilities")]
+dataset <- dataset[,-which(names(dataset) == "Id")]
+```
+
+## Hunting NAs
+
+## Counting columns with null values.
+
+```{r NAs discovery}
+na.cols <- which(colSums(is.na(dataset)) > 0)
+paste('There are', length(na.cols), 'columns with missing values')
+sort(colSums(sapply(dataset[na.cols], is.na)), decreasing = TRUE)
+
+```
+
+## Factor values. Here, the goal is to add a new factor level to replace the NAs
+```{r} 
+# Alley : NA means "no alley access"
+dataset$Alley = factor(dataset$Alley, levels=c(levels(dataset$Alley), "None"))
+dataset$Alley[is.na(dataset$Alley)] = "None"
+# PoolQc
+dataset$PoolQC= factor(dataset$PoolQC, levels = c(levels(dataset$PoolQC), 'None'))   
+dataset$PoolQC[is.na(dataset$PoolQC)] = 'None'
+# miscfeature
+dataset$MiscFeature= factor(dataset$MiscFeature, levels = c(levels(dataset$MiscFeature), 'None'))
+dataset$MiscFeature[is.na(dataset$MiscFeature)] = 'None'
+# fence
+dataset$Fence= factor(dataset$Fence, levels = c(levels(dataset$Fence), 'None'))  
+dataset$Fence[is.na(dataset$Fence)] = 'None'
+# FireplaceQu
+dataset$FireplaceQu = factor(dataset$FireplaceQu, levels = c(levels(dataset$FireplaceQu), 'None'))
+dataset$FireplaceQu[is.na(dataset$FireplaceQu)] = 'None'
+# GarageFinish
+dataset$GarageFinish= factor(dataset$GarageFinish, levels = c(levels(dataset$GarageFinish), 'None'))
+dataset$GarageFinish[is.na(dataset$GarageFinish)] = 'None'
+# GarageQual
+dataset$GarageQual= factor(dataset$GarageQual, levels = c(levels(dataset$GarageQual), 'None'))
+dataset$GarageQual[is.na(dataset$GarageQual)] = 'None'
+# GarageCond
+dataset$GarageCond <- factor(dataset$GarageCond, levels = c(levels(dataset$GarageCond), 'None'))
+dataset$GarageCond[is.na(dataset$GarageCond)] = 'None'
+# GarageType
+dataset$GarageType= factor(dataset$GarageType, levels = c(levels(dataset$GarageType), 'None'))
+dataset$GarageType[is.na(dataset$GarageType)] = 'None'
+# BsmtCond
+dataset$BsmtCond = factor(dataset$BsmtCond, levels = c(levels(dataset$BsmtCond), 'None'))
+dataset$BsmtCond[is.na(dataset$BsmtCond)] = 'None'
+# BsmtExposure
+dataset$BsmtExposure = factor(dataset$BsmtExposure, levels = c(levels(dataset$BsmtExposure), 'None'))
+dataset$BsmtExposure[is.na(dataset$BsmtExposure)] = 'No'
+# BsmtQual
+dataset$BsmtQual = factor(dataset$BsmtQual, levels = c(levels(dataset$BsmtQual), 'None'))
+dataset$BsmtQual[is.na(dataset$BsmtQual)] = 'None'
+# BsmtFinType2
+dataset$BsmtFinType2 = factor(dataset$BsmtFinType2, levels = c(levels(dataset$BsmtFinType2), 'None'))
+dataset$BsmtFinType2[is.na(dataset$BsmtFinType2)] = 'None'
+# BsmtFinType1
+dataset$BsmtFinType1 = factor(dataset$BsmtFinType1, levels = c(levels(dataset$BsmtFinType1), 'None'))
+dataset$BsmtFinType1[is.na(dataset$BsmtFinType1)] = 'None'
+# MasVnrType
+dataset$MasVnrType[is.na(dataset$MasVnrType)] = 'None'
+# MSZoning 
+dataset$MSZoning = factor(dataset$MSZoning, levels = c(levels(dataset$MSZoning), 'None'))
+dataset$MSZoning[is.na(dataset$MSZoning)] = 'None'
+# Functional
+dataset$Functional = factor(dataset$Functional, levels = c(levels(dataset$Functional), 'None'))
+dataset$Functional[is.na(dataset$Functional)] = 'None'
+# Exterior1st
+dataset$Exterior1st = factor(dataset$Exterior1st, levels = c(levels(dataset$Exterior1st), 'None'))
+dataset$Exterior1st[is.na(dataset$Exterior1st)] = 'None'
+# Exterior2nd
+dataset$Exterior2nd = factor(dataset$Exterior2nd, levels = c(levels(dataset$Exterior2nd), 'None'))
+dataset$Exterior2nd[is.na(dataset$Exterior2nd)] = 'None'
+# saletype
+dataset$SaleType= factor(dataset$SaleType, levels = c(levels(dataset$SaleType), 'None'))  
+dataset$SaleType[is.na(dataset$SaleType)] = 'None'
+# Electrical
+dataset$Electrical = factor(dataset$Electrical, levels = c(levels(dataset$Electrical), 'None'))
+dataset$Electrical[is.na(dataset$Electrical)] = 'None'
+# KitchenQual
+dataset$KitchenQual = factor(dataset$KitchenQual, levels = c(levels(dataset$KitchenQual), 'None'))
+dataset$KitchenQual[is.na(dataset$KitchenQual)] = 'None'
+```
+
+
+## Similarly, for numerical values:
+
+```{r}
+# LotFrontage : NA most likely means no lot frontage so we substitute the NA by 0
+dataset$LotFrontage[is.na(dataset$LotFrontage)] <- 0
+# GarageYrBlt will be replaced by the house year built.
+dataset$GarageYrBlt[is.na(dataset$GarageYrBlt)] <- dataset$YearBuilt[is.na(dataset$GarageYrBlt)]
+# MasvnrArea 
+dataset$MasVnrArea[is.na(dataset$MasVnrArea)] <- mean(dataset$MasVnrArea,na.rm=T)
+# BsmtFullBath
+dataset$BsmtFullBath[is.na(dataset$BsmtFullBath)] <- 0
+# Bsmthalfbath
+dataset$BsmtHalfBath[is.na(dataset$BsmtHalfBath)] <- 0
+# BsmtFinSF1
+dataset$BsmtFinSF1[is.na(dataset$BsmtFinSF1)] <- 0
+# BsmtFinSF2
+dataset$BsmtFinSF2[is.na(dataset$BsmtFinSF2)] <- 0
+# BsmtUnfSF
+dataset$BsmtUnfSF[is.na(dataset$BsmtUnfSF)] <- 0
+# TotalBsmtSF
+dataset$TotalBsmtSF[is.na(dataset$TotalBsmtSF)] <- 0
+#  Garagecars
+dataset$GarageCars[is.na(dataset$GarageCars)] <- mean(dataset$GarageCars,na.rm=T)
+# GarageArea
+dataset$GarageArea[is.na(dataset$GarageArea)] <- mean(dataset$GarageArea,na.rm=T)
+
+
+```
+
+## Factorize features
+
+```{r}
+## Factorize features
+# MSSubclass
+dataset$MSSubClass <- as.factor(dataset$MSSubClass)
+# MoSold
+dataset$MoSold <- as.factor(dataset$MoSold)
+# YrSold
+dataset$YrSold <- as.factor(dataset$YrSold)
+
+```
+
+# Outliers
+# Now, let's plot the columns that present extreme 'Max' values in the training data set to identify the outliers and remove those for the training data set.
+``` {r}
+
+# Remove outliers
+
+to_remove <- boxplot.stats(original_training_data$LotFrontage, coef = 3)$out
+cat("Number of outliers", length(to_remove))
+original_training_data <- original_training_data[!original_training_data$LotFrontage %in% to_remove, ]
+```
+
+#Let's do the same for the rest of the columns.
+```{r}
+for (col in names(original_training_data)) {
+if (is.numeric(original_training_data[[col]]) && col != "left"){
+print(ggplot(original_training_data, aes_string(y=col))+ geom_boxplot(width=0.1) + theme(axis.line.x=element_blank(),axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank(),legend.position="none"))
+to_remove <- boxplot.stats(original_training_data[[col]], coef = 3)$out
+original_training_data <- original_training_data[!original_training_data[[col]] %in% to_remove, ]
+}
+}
+```
+
+# Skewness
+
+```{r}
+df <- rbind(data.frame(version="price",x=original_training_data$SalePrice),
+            data.frame(version="log(price+1)",x=log(original_training_data$SalePrice + 1)))
+
+ggplot(data=df) +
+  facet_wrap(~version,ncol=2,scales="free_x") +
+  geom_histogram(aes(x=x), bins = 50)
+```
+
+# We therefore transform the target value applying log
+```{r Log transform the target for official scoring}
+dataset$SalePrice <- log1p(dataset$SalePrice)
+```
+
+```{r}
+skewness_threshold = 0.75
+```
+
+# Now, let's compute the skewness of each feature that is not 'factor' nor 'character'.
+
+```{r}
+column_types <- sapply(names(dataset), function(x) {
+    class(dataset[[x]])
+  }
+)
+numeric_columns <- names(column_types[column_types != "factor"])
+```
+
+```{r}
+# skew of each variable
+skew <- sapply(numeric_columns, function(x) { 
+    e1071::skewness(dataset[[x]], na.rm = T)
+  }
+)
+```
+
+
+# What we do need to make now is to apply the log to those whose skewness value is below a given threshold that we've set in 0.75. 
+```{r}
+# transform all variables above a threshold skewness.
+skew <- skew[abs(skew) > skewness_threshold]
+for(x in names(skew)) {
+  dataset[[x]] <- log(dataset[[x]] + 1)
+}
+```
+
+
+# Feature Creation
+
+```{r}
+# We apply the log of the variables containing area
+dataset$GrLivArea <- log10(dataset$GrLivArea)
+dataset$LotArea <- log10(dataset$LotArea)
+
+# Let's put together features already in the dataset to help the model in the prediction, for that we want to  know the number of baths/rooms the house has, so that we can understand better a relationship with the price of the house.
+
+dataset['Total_BathBsmt']  <- dataset["BsmtFullBath"] + dataset["BsmtHalfBath"]
+dataset$Total_BathBsmt[is.na(dataset$Total_BathBsmt)] <- 0 
+
+dataset['Total_BathAbvGr'] <- dataset["FullBath"] + dataset["HalfBath"] 
+
+dataset['Total_Bath'] <- dataset['Total_BathBsmt'] + dataset['Total_BathAbvGr']
+dataset$Total_Bath[is.na(dataset$Total_Bath)] <- 0 
+
+# Now, let's create a feature indentifying if the house has a second floor, since this can be one possible factor explaining the price of the house.
+dataset['Second_Floor'] <- 0 
+dataset[dataset['X2ndFlrSF'] > 0,'Second_Floor'] <- 1
+dataset$Second_Floor[is.na(dataset$Second_Floor)] <- 0 
+
+# Now, let's create a feature indentifying wether the house has a pool which can help identifying an increase in the price.
+dataset['pool'] <- 0 
+dataset[dataset['PoolArea'] > 0,'pool'] <- 1
+
+```
+
+# Train, Validation Spliting
+
+```{r Train test split}
+training_data <- dataset[1:1460,]
+test <- dataset[1461:2919,]
+```
+
+# We are going to split the annotated dataset in training and validation for the later evaluation of our regression models
+```{r Train Validation split}
+
+splitdf <- function(dataframe, seed=NULL) {
+  if (!is.null(seed)) set.seed(seed)
+ 	index <- 1:nrow(dataframe)
+ 	trainindex <- sample(index, trunc(length(index)/1.5))
+ 	trainset <- dataframe[trainindex, ]
+ 	testset <- dataframe[-trainindex, ]
+ 	list(trainset=trainset,testset=testset)
+}
+splits <- splitdf(training_data, seed=1)
+training <- splits$trainset
+validation <- splits$testset
+```
+
+#### Full Model
+
+Let's try first a baseline including all the features to evaluate the impact of the feature engineering.
+
+```{r message=FALSE, warning=FALSE}
+lm.model(training, validation, "Baseline")
+```
+
+### Chi-squared Selection
+
+```{r warning=FALSE}
+# Compute the ChiSquared Statistic over the factor features 
+features <- names(training[, sapply(training, is.factor) & colnames(training) != 'SalePrice'])
+chisquared <- data.frame(features, statistic = sapply(features, function(x) {
+  chisq.test(training$SalePrice, training[[x]])$statistic
+}))
+
+
+# Plot the result, and remove those below the 1st IQR 
+par(mfrow=c(1,2))
+boxplot(chisquared$statistic)
+bp.stats <- as.integer(boxplot.stats(chisquared$statistic)$stats)   
+
+chisquared.threshold = bp.stats[2]  # This element represent the 1st quartile.
+text(y = bp.stats, labels = bp.stats, x = 1.3, cex=0.7)
+barplot(sort(chisquared$statistic), names.arg = chisquared$features, cex.names = 0.6, las=2, horiz = T)
+abline(v=chisquared.threshold, col='red')  # Draw a red line over the 1st IQR
+```
+
+Now, we can test if this a good move, by removing any feature with a Chi Squared test statistic against the output below the 1 IQR.
+
+```{r message=FALSE, warning=FALSE}
+# Determine what features to remove from the training set.
+features_to_remove <- as.character(chisquared[chisquared$statistic < chisquared.threshold, "features"])
+lm.model(training[!names(training) %in% features_to_remove], validation, "ChiSquared Model")
+```
+
+### Now, Try with Spearman's correlation.
+
+```{r}
+# Compute the ChiSquared Statistic over the factor features ONLY
+features <- names(training[, sapply(training, is.numeric) & colnames(training) != 'SalePrice'])
+
+spearman <- data.frame(features, statistic = sapply(features, function(x) {
+  cor(training$SalePrice, training[[x]], method='spearman')
+}))
+
+# Plot the result, and remove those below the 1st IQR (inter-quartile-range) --aggressive
+par(mfrow=c(1,2))
+boxplot(abs(spearman$statistic))
+bp.stats <- boxplot.stats(abs(spearman$statistic))$stats   # Get the statistics from the boxplot
+text(y = bp.stats, 
+     labels = sapply(bp.stats, function(x){format(round(x, 3), nsmall=3)}), # This is to reduce the nr of decimals
+     x = 1.3, cex=0.7)
+
+spearman.threshold = bp.stats[2]  # This element represent the 1st quartile.
+
+barplot(sort(abs(spearman$statistic)), names.arg = spearman$features, cex.names = 0.6, las=2, horiz = T)
+abline(v=spearman.threshold, col='red')  # Draw a red line over the 1st IQR
+```
+
+So, how good is our feature cleaning process? Let's train the model with the new features, exactly as we did in the Chi Sq. section above.
+
+```{r message=FALSE, warning=FALSE}
+# Determine what features to remove from the training set.
+features_to_remove <- as.character(spearman[spearman$statistic < spearman.threshold, "features"])
+lm.model(training[!names(training) %in% features_to_remove], validation, "ChiSquared Model")
+
+```
+
+## Wrapper Methods
+
+# Backward Stepwise
+```{r}
+train_control_config_4_stepwise <- trainControl(method = "none", classProbs = TRUE)
+
+backward.lm.mod <- train(SalePrice ~ ., data = training, 
+               method = "glmStepAIC", 
+               direction = "backward",
+               trace = FALSE,
+               
+               trControl=train_control_config_4_stepwise)
+
+```
+
+```{r Selected Backward Features}
+paste("Features Selected" ,backward.lm.mod$finalModel$formula[3])
+```
+
+### Evaluate the selected model
+```{r Backward Evaluation}
+backward.lm.mod.pred <- predict(backward.lm.mod, test[,-which(names(test) == "SalePrice")])
+
+cm <- confusionMatrix(backward.lm.mod.pred, test$SalePrice, positive = "Yes")
+print(cm)
+```
+
+
+#### Forward Stepwise
+
+```{r Forward Stepwise}
+
+forward.lm.mod <- train(SalePrice ~ ., data = training, 
+                        method = "glmStepAIC", 
+                        direction = "forward",
+                        trace=FALSE,
+                                       
+                        trControl=train_control_config_4_stepwise)
+```
+
+## Printout only the selected features.
+```{r Selected Forward Features}
+paste("Features Selected" ,forward.lm.mod$finalModel$formula[3])
+```
+
+## Compute the new Accuracy
+
+```{r Forward Evaluation}
+
+forward.lm.mod.pred <- predict(forward.lm.mod, test[,-which(names(test) == "SalePrice")])
+
+cm <- confusionMatrix(forward.lm.mod.pred, test$SalePrice, positive = "Yes")
+print(cm)
+```
+
+## Embedded
+
+
+### Ridge Regression
+
+```{r Ridge Regression, warning=FALSE}
+lambdas <- 10^seq(-3, 0, by = .05)
+
+set.seed(121)
+train_control_config <- trainControl(method = "repeatedcv", 
+                                     number = 5, 
+                                     repeats = 1,
+                                     returnResamp = "all")
+
+ridge.mod <- train(SalePrice ~ ., data = training, 
+               method = "glmnet", 
+               metric = "RMSE",
+               trControl=train_control_config,
+               tuneGrid = expand.grid(alpha = 0, lambda = lambdas))
+```
+
+#### Evaluation
+
+```{r Ridge RMSE}
+plot(ridge.mod)
+```
+
+
+```{r Ridge Coefficients}
+plot(ridge.mod$finalModel)
+```
+
+```{r Ridge Evaluation}
+
+ridge.mod.pred <- predict(ridge.mod, validation)
+ridge.mod.pred[is.na(ridge.mod.pred)] <- 0
+
+my_data <- as.data.frame(cbind(predicted=(exp(ridge.mod.pred) -1), observed=(exp(validation$SalePrice) -1)))
+ridge.mod.rmse <- sqrt(mean((ridge.mod.pred - validation$SalePrice)^2))
+ridge.mod.price_error <- mean(abs((exp(ridge.mod.pred) -1) - (exp(validation$SalePrice) -1)))
+
+ggplot(my_data, aes(predicted, observed)) +
+    geom_point() + geom_smooth(method = "glm") +
+    labs(x="Predicted") +
+    ggtitle(ggtitle(paste("Ridge", 'RMSE: ', format(round(ridge.mod.rmse, 4), nsmall=4), ' --> Price ERROR:', format(round(ridge.mod.price_error, 0), nsmall=0), 
+                        ' €', sep=''))) +  
+    scale_x_continuous(labels = scales::comma) + 
+    scale_y_continuous(labels = scales::comma)
+
+```
+
+
+Rank the variables according to the importance attributed by the model.
+```{r}
+# Print, plot variable importance
+plot(varImp(ridge.mod), top = 20) # 20 most important features
+```
+
+
+# Final Submission
+
+```{r Final Submission}
+
+# Train the model using all the data
+final.model <- train(SalePrice ~ ., data = training, 
+               method = "glmnet", 
+               metric = "RMSE",
+               trControl=train_control_config,
+               tuneGrid = expand.grid(alpha = 0, lambda = lambdas))
+
+# Predict the prices for the test data (i.e., we use the exp function to revert the log transformation that we applied to the target variable)
+final.pred <- as.numeric(exp(predict(final.model, test))-1) 
+final.pred[is.na(final.pred)]
+hist(final.pred, main="Histogram of Predictions", xlab = "Predictions")
+
+lasso_submission <- data.frame(Id = original_test_data$Id, SalePrice= (final.pred))
+colnames(lasso_submission) <-c("Id", "SalePrice")
+write.csv(lasso_submission, file = "submission6.csv", row.names = FALSE) 
+
+```
+
